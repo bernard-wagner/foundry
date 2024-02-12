@@ -109,6 +109,7 @@ fn main() -> Result<()> {
         ForgeSubcommand::Selectors { command } => utils::block_on(command.run()),
         ForgeSubcommand::Generate(cmd) => match cmd.sub {
             GenerateSubcommands::Test(cmd) => cmd.run(),
+            GenerateSubcommands::Router(cmd) => cmd.run(),
         },
         ForgeSubcommand::VerifyBytecode(cmd) => utils::block_on(cmd.run()),
     }
