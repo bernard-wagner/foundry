@@ -1,17 +1,16 @@
-mod utils;
+mod router;
 
+use alloy_primitives::{Address, B256};
 use clap::{Parser, Subcommand};
 use eyre::Result;
-use foundry_common::fs;
-use std::path::Path;
-use alloy_primitives::{Address, U256};
-use ethers_core::abi::AbiEncode;
-use foundry_compilers::artifacts::output_selection::ContractOutputSelection;
-use foundry_compilers::info::{ContractInfo, ContractInfoRef};
-use itertools::Itertools;
-use yansi::Paint;
 use foundry_cli::opts::{CompilerArgs, CoreBuildArgs, ProjectPathsArgs};
-use foundry_common::compile::ProjectCompiler;
+use foundry_common::{
+    compile::{ProjectCompiler, SkipBuildFilter, SkipBuildFilters},
+    fs,
+};
+use foundry_compilers::artifacts::output_selection::ContractOutputSelection;
+use std::path::Path;
+use yansi::Paint;
 
 /// CLI arguments for `forge generate`.
 #[derive(Debug, Parser)]
@@ -26,7 +25,7 @@ pub enum GenerateSubcommands {
     Test(GenerateTestArgs),
 
     /// Scaffolds router file for given contracts
-    Router(GenerateRouterArgs),
+    Router(Box<GenerateRouterArgs>),
 }
 
 #[derive(Debug, Parser)]
@@ -38,35 +37,30 @@ pub struct GenerateTestArgs {
 
 #[derive(Debug, Parser)]
 pub struct GenerateRouterArgs {
-    #[clap(flatten)]
-    pub project_paths: ProjectPathsArgs,
-
     /// Router name for router generation.
-    #[clap(long, short, value_name = "ROUTER_NAME")]
+    #[clap(long, value_name = "ROUTER_NAME")]
     pub name: String,
 
     #[clap(long, default_value = "0x4e59b44847b379578588920ca78fbf26c0b4956c")]
     deployer: Address,
 
-    #[clap(long, default_value = "0x00")]
-    salt: U256,
+    #[clap(
+        long,
+        default_value = "0x0000000000000000000000000000000000000000000000000000000000000000"
+    )]
+    salt: B256,
 
     /// Contract names for router generation.
-    pub contract_names: Vec<String>,
-}
+    pub module_names: Vec<String>,
 
-#[derive(Debug, Clone)]
-pub struct FunctionSelector {
-    address: Address,
-    contract_name: String,
-    name: String,
-    selector: String,
+    #[clap(flatten)]
+    pub project_paths: ProjectPathsArgs,
 }
 
 impl GenerateTestArgs {
     pub fn run(self) -> Result<()> {
-        let contract_name = utils::format_identifier(&self.contract_name, true);
-        let instance_name = utils::format_identifier(&self.contract_name, false);
+        let contract_name = format_identifier(&self.contract_name, true);
+        let instance_name = format_identifier(&self.contract_name, false);
 
         // Create the test file content.
         let test_content = include_str!("../../../assets/generated/TestTemplate.t.sol");
@@ -90,15 +84,8 @@ impl GenerateTestArgs {
 
 impl GenerateRouterArgs {
     pub fn run(self) -> Result<()> {
-        let GenerateRouterArgs {
-            deployer,
-            name,
-            contract_names,
-            salt,
-            project_paths,
-        } = self;
-
-        let router_name = utils::format_identifier(&name, true);
+        let GenerateRouterArgs { deployer, name: router_name, module_names, salt, project_paths } =
+            self;
 
         let build_args = CoreBuildArgs {
             project_paths: project_paths.clone(),
@@ -111,74 +98,52 @@ impl GenerateRouterArgs {
 
         let project = build_args.project()?;
 
-        let output = ProjectCompiler::new().quiet(true).compile(&project)?;
+        let output_dir = project.sources_path().as_path().to_path_buf().join("generated/routers");
 
-        let artifacts = contract_names.iter().flat_map(|identifier| {
-            let ContractInfoRef{ path, name } = ContractInfo::new(identifier).into();
+        let filter = SkipBuildFilters::new(
+            [
+                SkipBuildFilter::Tests,
+                SkipBuildFilter::Custom(format!("{}/**.sol", output_dir.to_str().unwrap())),
+            ],
+            project.root().clone(),
+        )?;
 
-            let found_artifact = if let Some(path) = path {
-                output.find(path, name.clone())
-            } else {
-                output.find_first(name.clone())
-            };
+        ProjectCompiler::new().filter(Box::new(filter)).quiet(true).compile(&project)?;
 
-            let artifact = found_artifact
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "Could not find artifact `{name}` in the compiled artifacts"
-                    )
-                })?
-                .clone();
+        let output =
+            router::build_router(&project, router_name.clone(), module_names, deployer, salt)?;
 
-            // calculate create2 address
-            let address = Address::create2_from_code(&deployer, salt.to_be_bytes(), artifact.bytecode.clone().ok_or_else(|| {
-                eyre::eyre!("No bytecode found for contract `{name}`")
-            })?.bytes().ok_or_else(|| {
-                eyre::eyre!("No bytecode found for contract `{name}`")
-            })?);
+        let output_dir = Path::new(&output_dir);
+        fs::create_dir_all(output_dir)?;
 
-            let result = artifact
-                .abi
-                .ok_or_else(|| {
-                    eyre::eyre!("No ABI found for contract `{name}`")
-                })?
-                .functions
-                .into_values()
-                .flatten()
-                .map(|function| FunctionSelector {
-                    address,
-                    contract_name: name.into(),
-                    name: function.clone().name,
-                    selector: function.selector().encode_hex(),
-                })
-                .collect::<Vec<FunctionSelector>>();
+        let router_file_path = output_dir.join(format!("{}.g.sol", router_name));
+        fs::write(&router_file_path, output)?;
+        println!(
+            "{} router file: {}",
+            Paint::green("Generated"),
+            router_file_path.to_str().unwrap()
+        );
 
-            Ok(result)
-        }).flatten().sorted_by(|a, b| a.selector.cmp(&b.selector))
-            .collect::<Vec<_>>();
-
-        let router_tree = utils::build_binary_data(artifacts);
-        let module_lookup = utils::render_modules(artifacts);
-
-        let selectors = utils::render_selectors(router_tree);
-
-        // Create the router file content.
-        let router_content = include_str!("../../../assets/generated/RouterTemplate.t.sol");
-        let router_content = router_content
-            .replace("{selectors", &selectors)
-            .replace("{router_name}", &router_name)
-            .replace("{module_names}", &contract_names.join(", "));
-
-        // Create the router directory if it doesn't exist.
-        fs::create_dir_all("router")?;
-
-        // Define the router file path
-        let router_file_path = Path::new("router").join(format!("{}.t.sol", router_name));
-
-        // Write the router content to the router file.
-        fs::write(&router_file_path, router_content)?;
-
-        println!("{} router file: {}", Paint::green("Generated"), router_file_path.to_str().unwrap());
         Ok(())
     }
+}
+
+/// Utility function to convert an identifier to pascal or camel case.
+fn format_identifier(input: &str, is_pascal_case: bool) -> String {
+    let mut result = String::new();
+    let mut capitalize_next = is_pascal_case;
+
+    for word in input.split_whitespace() {
+        if !word.is_empty() {
+            let (first, rest) = word.split_at(1);
+            let formatted_word = if capitalize_next {
+                format!("{}{}", first.to_uppercase(), rest)
+            } else {
+                format!("{}{}", first.to_lowercase(), rest)
+            };
+            capitalize_next = true;
+            result.push_str(&formatted_word);
+        }
+    }
+    result
 }

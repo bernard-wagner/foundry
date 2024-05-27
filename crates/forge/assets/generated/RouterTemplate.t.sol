@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
-interface I{router_name}Router {
-    {functions}
-}
+{interface}
 
-contract {router_name}Router {
+contract {router_name} {
+    {modules}
+
     error UnknownSelector(bytes4 sel);
 
     fallback() external payable {
@@ -17,7 +17,7 @@ contract {router_name}Router {
             let sig32 := shr(224, sig4)
 
             function findImplementation(sig) -> result {
-                {selectors}
+{selectors}
             }
 
             implementation := findImplementation(sig32)
