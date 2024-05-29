@@ -101,10 +101,7 @@ impl GenerateRouterArgs {
         let output_dir = project.sources_path().as_path().to_path_buf().join("generated/routers");
 
         let filter = SkipBuildFilters::new(
-            [
-                SkipBuildFilter::Tests,
-                SkipBuildFilter::Custom(format!("{}/**.sol", output_dir.to_str().unwrap())),
-            ],
+            [SkipBuildFilter::Custom(format!("{}/**.sol", output_dir.to_str().unwrap()))],
             project.root().clone(),
         )?;
 

@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use alloy_json_abi::{Function, JsonAbi};
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, Selector, B256};
 use eyre::Result;
 use foundry_compilers::{artifacts::CompactContractBytecode, info::ContractInfo, Project};
 use hex::ToHexExt;
@@ -14,7 +14,7 @@ pub struct RouterTemplateInputs {
     address: Address,
     contract_name: String,
     function_name: String,
-    selector: String,
+    selector: Selector,
 }
 
 #[derive(Debug, Clone)]
@@ -36,16 +36,19 @@ pub(crate) fn build_router(
     let cached_artifacts = cache.read_artifacts::<CompactContractBytecode>()?;
 
     let mut combined_abi = JsonAbi::new();
-    let mut functions = BTreeMap::<String, Function>::new();
+    let mut functions = BTreeMap::<Selector, Function>::new();
     let mut selectors = Vec::new();
 
     for module_name in module_names.iter() {
         let ContractInfo { name: module_name, path: module_path } = ContractInfo::new(module_name);
 
-        let cached_artifact = module_path
-            .and_then(|path| cached_artifacts.find(path, module_name.clone()))
-            .or(cached_artifacts.find_first(module_name.clone()))
-            .ok_or_else(|| eyre::eyre!("No cached artifact found for contract `{module_name}`"))?;
+        let cached_artifact = match module_path {
+            Some(path) => {
+                project.paths.resolve_import(project.root(), Path::new(&path)).ok().and_then(|path| cached_artifacts.find(path, module_name.clone()))                
+            }
+            None => cached_artifacts.find_first(module_name.clone()),
+        }
+        .ok_or_else(|| eyre::eyre!("No cached artifact found for contract `{module_name}`"))?;           
 
         let bytecode = cached_artifact
             .bytecode
@@ -63,13 +66,11 @@ pub(crate) fn build_router(
 
         for function_set in abi.functions.iter() {
             for function in function_set.1.iter() {
-                let selector: String = function.selector().encode_hex_with_prefix();
-
-                if functions.contains_key(&selector) {
+                if functions.contains_key(&function.selector()) {
                     return Err(eyre::eyre!("Duplicate selector found"));
                 }
 
-                functions.insert(selector.clone(), function.clone());
+                functions.insert(function.selector(), function.clone());
 
                 if let Some(f) = combined_abi.functions.get_mut(&function.name) {
                     f.push(function.clone());
@@ -81,7 +82,7 @@ pub(crate) fn build_router(
                     address,
                     contract_name: module_name.clone(),
                     function_name: function.name.clone(),
-                    selector,
+                    selector: function.selector(),
                 });
             }
         }
@@ -127,6 +128,9 @@ pub(crate) fn build_router(
 
 fn build_binary_data(selectors: Vec<RouterTemplateInputs>) -> BinaryData {
     const MAX_SELECTORS_PER_SWITCH_STATEMENT: usize = 9;
+
+    let mut selectors = selectors.clone();
+    selectors.sort_by(|a, b| a.selector.cmp(&b.selector));
 
     fn binary_split(node: &mut BinaryData) {
         if node.selectors.len() > MAX_SELECTORS_PER_SWITCH_STATEMENT {
@@ -180,7 +184,7 @@ fn render_selectors(mut binary_data: BinaryData) -> String {
             selectors_str.push(format!(
                 "{}if lt(sig, {}) {{",
                 repeat_string("    ", indent),
-                mid_selector.selector
+                mid_selector.selector.encode_hex_with_prefix()
             ));
             render_node(&mut child_a, indent + 1, selectors_str);
             selectors_str.push(format!("{}}}", repeat_string("    ", indent)));
@@ -192,7 +196,7 @@ fn render_selectors(mut binary_data: BinaryData) -> String {
                 selectors_str.push(format!(
                     "{}case {} {{ result := {} }} // {}.{}()",
                     repeat_string("    ", indent + 1),
-                    s.selector,
+                    s.selector.encode_hex_with_prefix(),
                     to_constant_case(&s.contract_name),
                     s.contract_name,
                     s.function_name
