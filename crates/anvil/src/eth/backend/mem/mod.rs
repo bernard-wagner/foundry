@@ -2,7 +2,7 @@
 use self::state::trie_storage;
 use super::executor::new_evm_with_inspector;
 use crate::{
-    ForkChoice, NodeConfig, PrecompileFactory,
+    AnvilEvmFactory, ForkChoice, NodeConfig, PrecompileFactory,
     config::PruneStateHistoryConfig,
     eth::{
         backend::{
@@ -2297,7 +2297,7 @@ impl Backend<FoundryNetwork> {
             print_traces: self.print_traces,
             call_trace_decoder: self.call_trace_decoder.clone(),
             precompile_factory: self.precompile_factory.clone(),
-            networks: self.env.read().networks,
+            evm_factory: AnvilEvmFactory::new(self.env.read().networks),
             blob_params: self.blob_params(),
             cheats: self.cheats().clone(),
         };
@@ -2384,7 +2384,7 @@ impl Backend<FoundryNetwork> {
                     print_logs: self.print_logs,
                     print_traces: self.print_traces,
                     call_trace_decoder: self.call_trace_decoder.clone(),
-                    networks: self.env.read().networks,
+                    evm_factory: AnvilEvmFactory::new(self.env.read().networks),
                     precompile_factory: self.precompile_factory.clone(),
                     blob_params: self.blob_params(),
                     cheats: self.cheats().clone(),
@@ -3142,7 +3142,7 @@ impl Backend<FoundryNetwork> {
                 print_traces: self.print_traces,
                 call_trace_decoder: self.call_trace_decoder.clone(),
                 precompile_factory: self.precompile_factory.clone(),
-                networks: self.env.read().networks,
+                evm_factory: AnvilEvmFactory::new(self.env.read().networks),
                 blob_params: self.blob_params(),
                 cheats: self.cheats().clone(),
             };

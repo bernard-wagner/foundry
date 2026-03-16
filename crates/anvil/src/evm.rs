@@ -1,5 +1,15 @@
-use alloy_evm::precompiles::DynPrecompile;
+use alloy_evm::{
+    EthEvmFactory, EvmEnv, EvmFactory,
+    eth::EthEvmContext,
+    precompiles::{DynPrecompile, PrecompilesMap},
+};
+use alloy_op_evm::OpEvmFactory;
 use alloy_primitives::Address;
+use foundry_evm::backend::DatabaseError;
+use foundry_evm::core::either_evm::EitherEvm;
+use foundry_evm_networks::NetworkConfigs;
+use op_revm::OpContext;
+use revm::{Database, Inspector};
 use std::fmt::Debug;
 
 /// Object-safe trait that enables injecting extra precompiles when using
@@ -7,6 +17,59 @@ use std::fmt::Debug;
 pub trait PrecompileFactory: Send + Sync + Unpin + Debug {
     /// Returns a set of precompiles to extend the EVM with.
     fn precompiles(&self) -> Vec<(Address, DynPrecompile)>;
+}
+
+/// Factory for creating network-specific EVMs in anvil.
+///
+/// Encapsulates the Eth-vs-Op selection logic that was previously in
+/// the `new_evm_with_inspector` free function. Stored on
+/// [`TransactionExecutor`](crate::eth::backend::executor::TransactionExecutor)
+/// and created on-demand from [`Backend`](crate::eth::backend::mem::Backend).
+///
+/// **Future extensibility**: this struct can be turned into a trait when
+/// additional networks (e.g. Tempo, Arbitrum) need to be supported,
+/// allowing [`EitherEvm`] to be replaced with a trait-object approach.
+#[derive(Clone, Copy, Debug)]
+pub struct AnvilEvmFactory {
+    pub networks: NetworkConfigs,
+}
+
+impl AnvilEvmFactory {
+    pub fn new(networks: NetworkConfigs) -> Self {
+        Self { networks }
+    }
+
+    /// Creates an EVM with the appropriate network implementation.
+    ///
+    /// For Optimism: adjusts the spec to `ISTHMUS` and uses [`OpEvmFactory`].
+    /// For Ethereum: uses [`EthEvmFactory`].
+    pub fn create_evm<DB, I>(
+        &self,
+        db: DB,
+        evm_env: &EvmEnv,
+        inspector: I,
+    ) -> EitherEvm<DB, I, PrecompilesMap>
+    where
+        DB: Database<Error = DatabaseError> + Debug,
+        I: Inspector<EthEvmContext<DB>> + Inspector<OpContext<DB>>,
+    {
+        if self.networks.is_optimism() {
+            let env = EvmEnv::new(
+                evm_env
+                    .cfg_env
+                    .clone()
+                    .with_spec_and_mainnet_gas_params(op_revm::OpSpecId::ISTHMUS),
+                evm_env.block_env.clone(),
+            );
+            EitherEvm::Op(OpEvmFactory::default().create_evm_with_inspector(db, env, inspector))
+        } else {
+            EitherEvm::Eth(EthEvmFactory::default().create_evm_with_inspector(
+                db,
+                evm_env.clone(),
+                inspector,
+            ))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use crate::{
-    PrecompileFactory,
+    AnvilEvmFactory, PrecompileFactory,
     eth::{
         backend::{
             cheats::{CheatEcrecover, CheatsManager},
@@ -24,12 +24,11 @@ use alloy_eips::{
     eip7840::BlobParams,
 };
 use alloy_evm::{
-    EthEvmFactory, Evm, EvmEnv, EvmFactory, FromRecoveredTx,
+    Evm, EvmEnv, FromRecoveredTx,
     eth::EthEvmContext,
     precompiles::{DynPrecompile, Precompile, PrecompilesMap},
 };
 use alloy_network::Network;
-use alloy_op_evm::OpEvmFactory;
 use alloy_primitives::{B256, Bloom, BloomInput, Bytes, Log};
 use anvil_core::eth::{
     block::{TypedBlockInfo, create_block},
@@ -40,7 +39,6 @@ use foundry_evm::{
     core::{either_evm::EitherEvm, precompiles::EC_RECOVER},
     traces::{CallTraceDecoder, CallTraceNode},
 };
-use foundry_evm_networks::NetworkConfigs;
 use foundry_primitives::{FoundryNetwork, FoundryReceiptEnvelope, FoundryTxEnvelope};
 use op_revm::{OpContext, OpTransaction};
 use revm::{
@@ -147,7 +145,8 @@ pub struct TransactionExecutor<'a, Db: ?Sized, V: TransactionValidator<T>, T = F
     /// Cumulative blob gas used by all executed transactions
     pub blob_gas_used: u64,
     pub enable_steps_tracing: bool,
-    pub networks: NetworkConfigs,
+    /// Factory for creating network-specific EVMs.
+    pub evm_factory: AnvilEvmFactory,
     pub print_logs: bool,
     pub print_traces: bool,
     /// Recorder used for decoding traces, used together with print_traces
@@ -190,9 +189,9 @@ impl<DB: Db + ?Sized, V: TransactionValidator> TransactionExecutor<'_, DB, V> {
 
         // EIP-2935: store parent block hash in history storage contract.
         if is_prague && !block_number.is_zero() {
-            let env = Env::new(self.evm_env.clone(), Default::default(), self.networks);
             let mut inspector = AnvilInspector::default();
-            let mut evm = new_evm_with_inspector(&mut *self.db, &env, &mut inspector);
+            let mut evm =
+                self.evm_factory.create_evm(&mut *self.db, &self.evm_env, &mut inspector);
             // SYSTEM_ADDRESS is defined in EIP-4788 and reused by EIP-2935.
             match evm.transact_system_call(
                 eip4788::SYSTEM_ADDRESS,
@@ -343,11 +342,11 @@ impl<DB: Db + ?Sized, V: TransactionValidator> TransactionExecutor<'_, DB, V> {
             tx_env.base.authorization_list = cheated_auths;
         }
 
-        if self.networks.is_optimism() {
+        if self.evm_factory.networks.is_optimism() {
             tx_env.enveloped_tx = Some(tx.transaction.encoded_2718().into());
         }
 
-        Env::new(self.evm_env.clone(), tx_env, self.networks)
+        Env::new(self.evm_env.clone(), tx_env, self.evm_factory.networks)
     }
 }
 
@@ -440,8 +439,9 @@ impl<DB: Db + ?Sized, V: TransactionValidator> Iterator for &mut TransactionExec
         }
 
         let exec_result = {
-            let mut evm = new_evm_with_inspector(&mut *self.db, &env, &mut inspector);
-            self.networks.inject_precompiles(evm.precompiles_mut());
+            let mut evm =
+                self.evm_factory.create_evm(&mut *self.db, &env.evm_env, &mut inspector);
+            self.evm_factory.networks.inject_precompiles(evm.precompiles_mut());
 
             if let Some(factory) = &self.precompile_factory {
                 evm.precompiles_mut().extend_precompiles(factory.precompiles());
@@ -543,7 +543,10 @@ fn build_logs_bloom(logs: &[Log], bloom: &mut Bloom) {
     }
 }
 
-/// Creates a database with given database and inspector.
+/// Creates an EVM with the given database, environment, and inspector.
+///
+/// Convenience wrapper around [`AnvilEvmFactory::create_evm`] for call sites
+/// that have a full [`Env`] but no stored factory.
 pub fn new_evm_with_inspector<DB, I>(
     db: DB,
     env: &Env,
@@ -553,20 +556,5 @@ where
     DB: Database<Error = DatabaseError> + Debug,
     I: Inspector<EthEvmContext<DB>> + Inspector<OpContext<DB>>,
 {
-    if env.networks.is_optimism() {
-        let evm_env = EvmEnv::new(
-            env.evm_env
-                .cfg_env
-                .clone()
-                .with_spec_and_mainnet_gas_params(op_revm::OpSpecId::ISTHMUS),
-            env.evm_env.block_env.clone(),
-        );
-        EitherEvm::Op(OpEvmFactory::default().create_evm_with_inspector(db, evm_env, inspector))
-    } else {
-        EitherEvm::Eth(EthEvmFactory::default().create_evm_with_inspector(
-            db,
-            env.evm_env.clone(),
-            inspector,
-        ))
-    }
+    AnvilEvmFactory::new(env.networks).create_evm(db, &env.evm_env, inspector)
 }

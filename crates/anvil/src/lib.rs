@@ -55,7 +55,7 @@ mod error;
 pub mod eth;
 /// Evm related abstractions
 mod evm;
-pub use evm::PrecompileFactory;
+pub use evm::{AnvilEvmFactory, PrecompileFactory};
 
 /// support for polling filters
 pub mod filter;
