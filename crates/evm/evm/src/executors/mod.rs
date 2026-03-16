@@ -27,6 +27,7 @@ use foundry_evm_core::{
         DEFAULT_CREATE2_DEPLOYER_CODE, DEFAULT_CREATE2_DEPLOYER_DEPLOYER,
     },
     decode::{RevertDecoder, SkipReason},
+    evm::FoundryEvmFactory,
     utils::StateChangeset,
 };
 use foundry_evm_coverage::HitMaps;
@@ -107,6 +108,8 @@ pub struct Executor {
     gas_limit: u64,
     /// Whether `failed()` should be called on the test contract to determine if the test failed.
     legacy_assertions: bool,
+    /// Factory for creating network-specific EVMs.
+    evm_factory: Box<dyn FoundryEvmFactory>,
 }
 
 impl Executor {
@@ -132,7 +135,8 @@ impl Executor {
             },
         );
 
-        Self { backend: Arc::new(backend), env, inspector, gas_limit, legacy_assertions }
+        let evm_factory = inspector.inner.evm_factory.clone();
+        Self { backend: Arc::new(backend), env, inspector, gas_limit, legacy_assertions, evm_factory }
     }
 
     fn clone_with_backend(&self, backend: Backend) -> Self {
@@ -148,6 +152,7 @@ impl Executor {
             inspector: self.inspector().clone(),
             gas_limit: self.gas_limit,
             legacy_assertions: self.legacy_assertions,
+            evm_factory: self.evm_factory.clone(),
         }
     }
 
@@ -521,7 +526,9 @@ impl Executor {
     pub fn call_with_env(&self, mut env: Env) -> eyre::Result<RawCallResult> {
         let mut stack = self.inspector().clone();
         let mut backend = CowBackend::new_borrowed(self.backend());
-        let result = backend.inspect(&mut env, stack.as_inspector())?;
+        let mut inspector = stack.as_inspector();
+        let result = backend.inspect(&mut env, &mut inspector, &*self.evm_factory)?;
+        drop(inspector);
         convert_executed_result(env, stack, result, backend.has_state_snapshot_failure())
     }
 
@@ -529,8 +536,11 @@ impl Executor {
     #[instrument(name = "transact", level = "debug", skip_all)]
     pub fn transact_with_env(&mut self, mut env: Env) -> eyre::Result<RawCallResult> {
         let mut stack = self.inspector().clone();
+        let factory = self.evm_factory.clone();
         let backend = self.backend_mut();
-        let result = backend.inspect(&mut env, stack.as_inspector())?;
+        let mut inspector = stack.as_inspector();
+        let result = backend.inspect(&mut env, &mut inspector, &*factory)?;
+        drop(inspector);
         let mut result =
             convert_executed_result(env, stack, result, backend.has_state_snapshot_failure())?;
         self.commit(&mut result);

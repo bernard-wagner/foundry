@@ -36,12 +36,12 @@ use foundry_common::{
     mapping_slots::{MappingSlots, step as mapping_step},
 };
 use foundry_evm_core::{
-    Breakpoints, Env, EvmEnv, FoundryInspectorExt, FoundryTransaction,
+    Breakpoints, Env, EvmEnv, FoundryCfg, FoundryInspectorExt, FoundryTransaction,
     abi::Vm::stopExpectSafeMemoryCall,
     backend::{DatabaseError, DatabaseExt, FoundryJournalExt, RevertDiagnostic},
     constants::{CHEATCODE_ADDRESS, HARDHAT_CONSOLE_ADDRESS, MAGIC_ASSUME},
     env::FoundryContextExt,
-    evm::{NestedEvm, new_evm_with_inspector, with_cloned_context},
+    evm::{EthFoundryEvmFactory, FoundryEvmFactory, NestedEvm, with_cloned_context},
 };
 use foundry_evm_traces::{
     TracingInspector, TracingInspectorConfig, identifier::SignaturesIdentifier,
@@ -195,12 +195,13 @@ impl<CTX: FoundryContextExt<Journal: FoundryJournalExt>> CheatcodesExecutor<CTX>
         ecx: &mut CTX,
         f: NestedEvmClosure<'_>,
     ) -> Result<(), EVMError<DatabaseError>> {
+        let factory = EthFoundryEvmFactory;
         with_cloned_context(ecx, |db, evm_env, tx_env, journal_inner| {
-            let mut evm = new_evm_with_inspector(db, evm_env, tx_env, cheats);
+            let mut evm = factory.create_evm(db, evm_env, tx_env, cheats);
             *evm.journal_inner_mut() = journal_inner;
-            f(&mut evm)?;
+            f(&mut *evm)?;
             let (sub_evm_env, sub_tx) = evm.to_env();
-            let sub_inner = evm.into_context().journaled_state.inner;
+            let sub_inner = evm.into_journal_inner();
             Ok(((), sub_evm_env, sub_tx, sub_inner))
         })
     }
@@ -213,8 +214,9 @@ impl<CTX: FoundryContextExt<Journal: FoundryJournalExt>> CheatcodesExecutor<CTX>
         tx_env: TxEnv,
         f: NestedEvmClosure<'_>,
     ) -> Result<(), EVMError<DatabaseError>> {
-        let mut evm = new_evm_with_inspector(db, evm_env, tx_env, cheats);
-        f(&mut evm)
+        let factory = EthFoundryEvmFactory;
+        let mut evm = factory.create_evm(db, evm_env, tx_env, cheats);
+        f(&mut *evm)
     }
 
     fn transact_on_db(
@@ -1198,7 +1200,7 @@ impl<CTX: CheatsCtxExt> Inspector<CTX> for Cheatcodes {
         // When the first interpreter is initialized we've circumvented the balance and gas checks,
         // so we apply our actual block data with the correct fees and all.
         if let Some(block) = self.block.take() {
-            *ecx.block_mut() = block;
+            *ecx.block_mut() = block.into();
         }
         if let Some(gas_price) = self.gas_price.take() {
             ecx.tx_mut().set_gas_price(gas_price);

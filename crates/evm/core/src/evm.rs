@@ -255,6 +255,9 @@ pub trait NestedEvm {
 
     /// Returns a snapshot of the current environment (cfg + block, tx).
     fn to_env(&self) -> (EvmEnv, TxEnv);
+
+    /// Consumes the boxed EVM and returns the journal inner state.
+    fn into_journal_inner(self: Box<Self>) -> JournaledState;
 }
 
 impl<I: InspectorExt> NestedEvm for FoundryEvm<'_, I> {
@@ -278,6 +281,10 @@ impl<I: InspectorExt> NestedEvm for FoundryEvm<'_, I> {
             EvmEnv { cfg_env: self.inner.ctx.cfg.clone(), block_env: self.inner.ctx.block.clone() },
             self.inner.ctx.tx.clone(),
         )
+    }
+
+    fn into_journal_inner(self: Box<Self>) -> JournaledState {
+        self.into_context().journaled_state.inner
     }
 }
 
@@ -310,6 +317,62 @@ where
     Env::apply_evm_and_tx(ecx, sub_evm_env, sub_tx);
 
     Ok(result)
+}
+
+/// Factory for creating network-specific Foundry EVMs.
+///
+/// Each network (Eth, Tempo, etc.) implements this to produce its own
+/// EVM type. The produced EVM implements [`NestedEvm`], which is the
+/// object-safe abstraction used by cheatcode closures.
+///
+/// The factory takes standard `EvmEnv`/`TxEnv` (the "common currency")
+/// and internally converts to whatever context types the network needs.
+pub trait FoundryEvmFactory: Send + Sync + 'static {
+    /// Creates an EVM with the given inspector, returning it as a `dyn NestedEvm`.
+    ///
+    /// Lifetime `'a` covers both the database and inspector references.
+    fn create_evm<'a>(
+        &self,
+        db: &'a mut dyn DatabaseExt,
+        evm_env: EvmEnv,
+        tx_env: TxEnv,
+        inspector: &'a mut dyn InspectorExt,
+    ) -> Box<dyn NestedEvm + 'a>;
+
+    /// Clone this factory into a boxed trait object.
+    fn clone_box(&self) -> Box<dyn FoundryEvmFactory>;
+}
+
+impl Clone for Box<dyn FoundryEvmFactory> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+impl std::fmt::Debug for dyn FoundryEvmFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("dyn FoundryEvmFactory")
+    }
+}
+
+/// Default [`FoundryEvmFactory`] for Ethereum. Delegates to [`new_evm_with_inspector`].
+#[derive(Clone, Debug, Default)]
+pub struct EthFoundryEvmFactory;
+
+impl FoundryEvmFactory for EthFoundryEvmFactory {
+    fn create_evm<'a>(
+        &self,
+        db: &'a mut dyn DatabaseExt,
+        evm_env: EvmEnv,
+        tx_env: TxEnv,
+        inspector: &'a mut dyn InspectorExt,
+    ) -> Box<dyn NestedEvm + 'a> {
+        Box::new(new_evm_with_inspector(db, evm_env, tx_env, inspector))
+    }
+
+    fn clone_box(&self) -> Box<dyn FoundryEvmFactory> {
+        Box::new(self.clone())
+    }
 }
 
 pub struct FoundryHandler<'db, I: InspectorExt> {

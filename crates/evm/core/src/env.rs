@@ -28,18 +28,27 @@ impl Env {
     }
 
     /// Clones the evm env and tx env separately from a [`FoundryContextExt`] context.
+    ///
+    /// Converts from the context's network-specific types to the standard `EvmEnv`/`TxEnv`
+    /// representation via the `Into` bounds on [`FoundryContextExt`].
     pub fn clone_evm_and_tx(ecx: &mut impl FoundryContextExt) -> (EvmEnv, TxEnv) {
         (
-            EvmEnv { cfg_env: ecx.cfg_mut().clone(), block_env: ecx.block_mut().clone() },
-            ecx.tx_mut().clone(),
+            EvmEnv {
+                cfg_env: ecx.cfg_mut().clone().into(),
+                block_env: ecx.block_mut().clone().into(),
+            },
+            ecx.tx_mut().clone().into(),
         )
     }
 
     /// Writes the split evm env and tx env back into a [`FoundryContextExt`] context.
+    ///
+    /// Converts from the standard `EvmEnv`/`TxEnv` representation to the context's
+    /// network-specific types via the `From` bounds on [`FoundryContextExt`].
     pub fn apply_evm_and_tx(ecx: &mut impl FoundryContextExt, evm_env: EvmEnv, tx_env: TxEnv) {
-        *ecx.block_mut() = evm_env.block_env;
-        *ecx.cfg_mut() = evm_env.cfg_env;
-        *ecx.tx_mut() = tx_env;
+        *ecx.block_mut() = evm_env.block_env.into();
+        *ecx.cfg_mut() = evm_env.cfg_env.into();
+        *ecx.tx_mut() = tx_env.into();
     }
 }
 
@@ -275,15 +284,23 @@ impl FoundryCfg for CfgEnv {
 ///
 /// [`ContextTr`] only exposes immutable references for block, tx, and cfg.
 /// Cheatcodes like `vm.warp()`, `vm.roll()`, `vm.chainId()` need to mutate these fields.
+///
+/// The associated types must be convertible to/from the standard Ethereum env types
+/// (`BlockEnv`, `TxEnv`, `CfgEnv`) so that the common-currency `EvmEnv`/`TxEnv`
+/// representation used by `DatabaseExt` can round-trip through any network.
 pub trait FoundryContextExt:
-    ContextTr<Block: FoundryBlock + Clone, Tx: FoundryTransaction + Clone, Cfg: FoundryCfg + Clone>
+    ContextTr<
+    Block: FoundryBlock + Clone + Into<BlockEnv> + From<BlockEnv>,
+    Tx: FoundryTransaction + Clone + Into<TxEnv> + From<TxEnv>,
+    Cfg: FoundryCfg + Clone + Into<CfgEnv> + From<CfgEnv>,
+>
 {
     /// Mutable reference to the block environment.
-    fn block_mut(&mut self) -> &mut BlockEnv;
+    fn block_mut(&mut self) -> &mut Self::Block;
     /// Mutable reference to the transaction environment.
-    fn tx_mut(&mut self) -> &mut TxEnv;
+    fn tx_mut(&mut self) -> &mut Self::Tx;
     /// Mutable reference to the configuration environment.
-    fn cfg_mut(&mut self) -> &mut CfgEnv;
+    fn cfg_mut(&mut self) -> &mut Self::Cfg;
 }
 
 impl<DB: Database, J: JournalTr<Database = DB>, C> FoundryContextExt

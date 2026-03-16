@@ -9,7 +9,7 @@ use crate::{
     },
     fork::{CreateFork, ForkId},
 };
-use alloy_evm::{Evm, EvmEnv};
+use alloy_evm::EvmEnv;
 use alloy_genesis::GenesisAccount;
 use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types::TransactionRequest;
@@ -64,25 +64,23 @@ impl<'a> CowBackend<'a> {
     /// Note: in case there are any cheatcodes executed that modify the environment, this will
     /// update the given `env` with the new values.
     #[instrument(name = "inspect", level = "debug", skip_all)]
-    pub fn inspect<I: InspectorExt>(
+    pub fn inspect(
         &mut self,
         env: &mut Env,
-        inspector: I,
+        inspector: &mut dyn InspectorExt,
+        factory: &dyn crate::evm::FoundryEvmFactory,
     ) -> eyre::Result<ResultAndState> {
         // this is a new call to inspect with a new env, so even if we've cloned the backend
         // already, we reset the initialized state
         self.spec_id = Some(env.evm_env.cfg_env.spec);
 
-        let mut evm = crate::evm::new_evm_with_inspector(
-            self,
-            env.evm_env.clone(),
-            env.tx.clone(),
-            inspector,
-        );
+        let mut evm =
+            factory.create_evm(self, env.evm_env.clone(), env.tx.clone(), inspector);
 
         let res = evm.transact(env.tx.clone()).wrap_err("EVM error")?;
 
-        *env = Env::from(evm.cfg.clone(), evm.block.clone(), evm.tx.clone());
+        let (evm_env, tx) = evm.to_env();
+        *env = Env { evm_env, tx };
 
         Ok(res)
     }

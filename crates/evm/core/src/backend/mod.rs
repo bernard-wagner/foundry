@@ -806,22 +806,19 @@ impl Backend {
     /// Note: in case there are any cheatcodes executed that modify the environment, this will
     /// update the given `env` with the new values.
     #[instrument(name = "inspect", level = "debug", skip_all)]
-    pub fn inspect<I: InspectorExt>(
+    pub fn inspect(
         &mut self,
         env: &mut Env,
-        inspector: I,
+        inspector: &mut dyn InspectorExt,
+        factory: &dyn crate::evm::FoundryEvmFactory,
     ) -> eyre::Result<ResultAndState> {
         self.initialize(env);
-        let mut evm = crate::evm::new_evm_with_inspector(
-            self,
-            env.evm_env.to_owned(),
-            env.tx.to_owned(),
-            inspector,
-        );
+        let mut evm = factory.create_evm(self, env.evm_env.to_owned(), env.tx.to_owned(), inspector);
 
         let res = evm.transact(env.tx.clone()).wrap_err("EVM error")?;
 
-        *env = Env::from(evm.cfg.clone(), evm.block.clone(), evm.tx.clone());
+        let (evm_env, tx) = evm.to_env();
+        *env = Env { evm_env, tx };
 
         Ok(res)
     }

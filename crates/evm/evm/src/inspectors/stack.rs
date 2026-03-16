@@ -16,7 +16,7 @@ use foundry_evm_core::{
     Env, FoundryBlock, FoundryInspectorExt, FoundryTransaction, InspectorExt,
     backend::{DatabaseError, DatabaseExt, FoundryJournalExt, JournaledState},
     env::FoundryContextExt,
-    evm::{NestedEvm, new_evm_with_inspector, with_cloned_context},
+    evm::{EthFoundryEvmFactory, FoundryEvmFactory, with_cloned_context},
 };
 use foundry_evm_coverage::HitMaps;
 use foundry_evm_networks::NetworkConfigs;
@@ -327,7 +327,7 @@ impl InspectorStack {
 /// All used inpectors besides [Cheatcodes].
 ///
 /// See [`InspectorStack`].
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct InspectorStackInner {
     /// Solar compiler instance, to grant syntactic and semantic analysis capabilities.
     pub analysis: Option<Analysis>,
@@ -355,6 +355,33 @@ pub struct InspectorStackInner {
     pub top_frame_journal: HashMap<Address, Account>,
     /// Address that reverted the call, if any.
     pub reverter: Option<Address>,
+    /// Factory for creating network-specific EVMs behind the `dyn NestedEvm` abstraction.
+    pub evm_factory: Box<dyn FoundryEvmFactory>,
+}
+
+impl Default for InspectorStackInner {
+    fn default() -> Self {
+        Self {
+            analysis: None,
+            chisel_state: None,
+            edge_coverage: None,
+            fuzzer: None,
+            line_coverage: None,
+            log_collector: None,
+            printer: None,
+            revert_diag: None,
+            script_execution_inspector: None,
+            tracer: None,
+            enable_isolation: false,
+            networks: NetworkConfigs::default(),
+            create2_deployer: Address::default(),
+            in_inner_context: false,
+            inner_context_data: None,
+            top_frame_journal: HashMap::default(),
+            reverter: None,
+            evm_factory: Box::new(EthFoundryEvmFactory),
+        }
+    }
 }
 
 /// Struct keeping mutable references to both parts of [InspectorStack] and implementing
@@ -373,13 +400,15 @@ impl<CTX: FoundryContextExt<Journal: FoundryJournalExt>> CheatcodesExecutor<CTX>
         ecx: &mut CTX,
         f: NestedEvmClosure<'_>,
     ) -> Result<(), EVMError<DatabaseError>> {
+        // Clone factory BEFORE borrowing self for the inspector (borrow-checker).
+        let factory = self.evm_factory.clone();
         let mut inspector = InspectorStackRefMut { cheatcodes: Some(cheats), inner: self };
         with_cloned_context(ecx, |db, evm_env, tx_env, journal_inner| {
-            let mut evm = new_evm_with_inspector(db, evm_env, tx_env, &mut inspector);
+            let mut evm = factory.create_evm(db, evm_env, tx_env, &mut inspector);
             *evm.journal_inner_mut() = journal_inner;
-            f(&mut evm)?;
+            f(&mut *evm)?;
             let (sub_evm_env, sub_tx) = evm.to_env();
-            let sub_inner = evm.into_context().journaled_state.inner;
+            let sub_inner = evm.into_journal_inner();
             Ok(((), sub_evm_env, sub_tx, sub_inner))
         })
     }
@@ -392,9 +421,10 @@ impl<CTX: FoundryContextExt<Journal: FoundryJournalExt>> CheatcodesExecutor<CTX>
         tx_env: revm::context::TxEnv,
         f: NestedEvmClosure<'_>,
     ) -> Result<(), EVMError<DatabaseError>> {
+        let factory = self.evm_factory.clone();
         let mut inspector = InspectorStackRefMut { cheatcodes: Some(cheats), inner: self };
-        let mut evm = new_evm_with_inspector(db, evm_env, tx_env, &mut inspector);
-        f(&mut evm)
+        let mut evm = factory.create_evm(db, evm_env, tx_env, &mut inspector);
+        f(&mut *evm)
     }
 
     fn transact_on_db(
@@ -769,9 +799,11 @@ impl InspectorStackRefMut<'_> {
         let (evm_env, tx_env) = Env::clone_evm_and_tx(ecx);
 
         let res = self.with_inspector(|mut inspector| {
+            // Clone factory before borrowing inspector for the EVM.
+            let factory = inspector.inner.evm_factory.clone();
             let (res, nested_env) = {
                 let (db, journal) = ecx.journal_mut().as_db_and_inner();
-                let mut evm = new_evm_with_inspector(db, evm_env, tx_env.clone(), &mut inspector);
+                let mut evm = factory.create_evm(db, evm_env, tx_env.clone(), &mut inspector);
 
                 evm.journal_inner_mut().state = {
                     let mut state = journal.state.clone();
